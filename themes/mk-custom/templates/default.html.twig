@@ -1,0 +1,10 @@
+{% extends 'partials/base.html.twig' %}
+
+{% block content %}
+    <article class="content-item">
+        {{ page.content|raw }}
+    </article>
+    <div class="text-center"><sub>-- Last Modified on <time datetime=" {{ page.date|date("M d Y") }}" class="entry-date entry-meta-element modified" title=" {{ page.date|date("M d Y") }}" itemprop="dateModified"> {{ page.date|date("M d Y") }} </time> --</sub></div>
+{% endblock %}
+
+

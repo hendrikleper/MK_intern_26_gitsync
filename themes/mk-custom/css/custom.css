@@ -1,0 +1,249 @@
+/* ===== TYPOGRAPHY & FONTS ===== */
+
+@font-face {
+  font-family: 'Inclusive Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/InclusiveSans-Regular.woff2') format('woff2');
+}
+
+/* Headings and display text */
+h1, h2, h3, h4, h5, h6,
+.display, .h-display {
+  font-family: 'Inclusive Sans', 'Inter', sans-serif;
+}
+
+/* ===== MODULAR FEATURES SECTION ===== */
+
+.modular-features {
+  background-image: url('../images/bg.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.modular-features h1 {
+  color: var(--q2-accent);
+}
+
+.feature-icon h3 {
+  color: var(--q2-text-strong);
+  text-shadow: 1px 1px var(--q2-bg);
+}
+
+.modular-features .feature-icon i {
+  color: var(--q2-accent);
+  font-size: 3rem;
+  margin-bottom: -2.5rem;
+}
+
+/* ===== CHIPS & BADGES ===== */
+
+.chipXL { 
+  -ms-flex-align: center; 
+  align-items: center; 
+  background: var(--q2-accent-2);
+  color: var(--q2-bg-elev);
+  border-radius: 5rem; 
+  display: -ms-inline-flexbox; 
+  display: inline-flex; 
+  font-size: 130%; 
+  height: 1.5rem; 
+  line-height: 1rem; 
+  margin: 0.4rem; 
+  max-width: 400px; 
+  overflow: hidden; 
+  padding: 0.9rem 1.2rem; 
+  text-decoration: none; 
+  text-overflow: ellipsis; 
+  vertical-align: middle; 
+  white-space: nowrap;
+  box-shadow: var(--q2-shadow-card);
+  transition: box-shadow .2s ease, transform .2s ease; 
+}
+
+
+.chipXL > a {
+  text-decoration: none; 
+  color: var(--q2-elev);
+}
+
+.chipXL.active {  
+  color: var(--q2-elev);
+}
+
+/* Hover effect for chips */
+.chipXL:hover { 
+  cursor: pointer;
+  box-shadow: var(--q2-shadow-raised); 
+  transform: translateY(-2px);
+}
+
+/* ===== NOTICES & ALERTS ===== */
+
+.notices {
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.notices.yellow {
+  border-left: 6px solid rgb(235, 192, 36);
+  color: var(--q2-text-strong);
+  background-color: rgb(from var(--q2-accent) r g b / 0.1);
+}
+
+.notices p { 
+  margin: 0.5rem 0.5rem 0.5rem 1.5rem; 
+}
+
+.bg-warning-light {
+  /* De browser mixt de variabele met 20% opacity */
+  background-color: rgb(from var(--q2-accent) r g b / 0.2);
+}
+
+/* ===== TABLE OF CONTENTS ===== */
+
+/* Page table of contents styling */
+.page-toc {
+  border: 1px dotted var(--q2-focus-ring);
+  border-radius: var(--q2-radius-md, 0.5rem);
+  padding: 1rem;
+  background-color: var(--q2-bg-elev);
+}
+.page-toc a {
+  color: var(--q2-accent-2);
+  text-decoration: none;
+}
+.page-toc h4 {
+  font-size: 90%;
+  margin-top: 0;
+  margin-bottom: 0.2rem;
+}
+.page-toc ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.page-toc li {
+  font-size: 90%; 
+  display: inline-block;
+  vertical-align: top;
+  margin: 0;
+  padding: 0;
+}
+.page-toc li:first-child {
+  padding: 0;
+}
+.page-toc li::after {
+  content: ' • ';
+}
+.page-toc li:last-child::after {
+  content: '';
+}
+.page-toc li:has(> ul)::after {
+  content: '';
+}
+.page-toc li ul {
+  display: block;
+  margin-left: 1.5rem;
+  margin-top: 0.2rem;
+}
+.page-toc li li {
+  display: inline-block;
+  padding: 0 0 0 0.5rem;
+}
+.page-toc li li:first-child {
+  padding: 0 0 0 0;
+}
+.page-toc li li:last-child::after {
+  content: '';
+}
+
+
+
+/* Default content column — white rounded "card" sitting on the gray canvas */
+#body-wrapper > .container > .content-item {
+  max-width: 1160px;    /* make the content column a bit wider than the default 960px */
+}
+
+/* ===== LAYOUT & GRID ===== */
+
+/* 3-Column Grid Layout */
+.grid--3col {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.5rem;
+  grid-auto-flow: dense;
+}
+
+/* Utility classes for flexible column spanning */
+.col-span-1 {
+  grid-column: span 1;
+}
+
+.col-span-2 {
+  grid-column: span 2;
+}
+
+.col-span-3 {
+  grid-column: span 3;
+}
+
+/* Table styling */
+table {
+  width: 100%;
+  display: table;
+  border-radius: var(--q2-radius-md, 0.5rem);
+  border: 1px solid var(--q2-border-strong);
+  overflow: hidden
+}
+
+/* ===== CARDS & CONTENT ===== */
+
+.card {
+  margin: 1rem 0;
+  padding: 1rem;
+}
+
+.card h2 {
+  margin-top: 0;
+}
+
+/* Image styling - rounded corners on all images */
+img {
+  border-radius: var(--q2-radius-md, 0.2rem);
+}
+
+/* ===== RESPONSIVE DESIGN ===== */
+
+/* Allow horizontal scroll for tables on small screens */
+@media (max-width: 768px) {
+  /* Scrollable articles on mobile */
+  article {
+    overflow-x: auto;
+  }
+  
+  /* Smaller table text on mobile */
+  table {
+    font-size: 0.9rem;
+    white-space: nowrap;
+  }
+  
+  table td, 
+  table th {
+    padding: 0.5rem 0.25rem;
+  }
+
+  /* Single column layout on mobile */
+  .grid--3col {
+    grid-template-columns: 1fr;
+  }
+  
+  .col-span-1,
+  .col-span-2,
+  .col-span-3 {
+    grid-column: span 1;
+  }
+}

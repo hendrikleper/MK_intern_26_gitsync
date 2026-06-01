@@ -1,0 +1,37 @@
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Document</title>
+    <style>
+      div {
+        height: 250px;
+        background-color: rgb(234, 236, 236);
+        font-family: sans-serif;
+        text-align: center;
+      }
+      .hide {
+        background-color: #ffd900;
+        color: #fff;
+      }
+      h1 {
+        font-size: 150px;
+        margin: 0;
+      }
+      @media (max-width: 640px) {
+        .hide {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      <h1>1</h1>
+    </div>
+    <div class="hide">
+      <h1>2</h1>
+      <p>I will be hidden on small screens.</p>
+    </div>
+  </body>
+</html>

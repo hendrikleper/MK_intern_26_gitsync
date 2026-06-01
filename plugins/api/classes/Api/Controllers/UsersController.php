@@ -1,0 +1,711 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Grav\Plugin\Api\Controllers;
+
+use Grav\Common\User\Authentication;
+use Grav\Common\User\Interfaces\UserCollectionInterface;
+use Grav\Common\User\Interfaces\UserInterface;
+use Grav\Framework\Flex\FlexDirectory;
+use Grav\Plugin\Api\Auth\ApiKeyManager;
+use Grav\Plugin\Api\Exceptions\ConflictException;
+use Grav\Plugin\Api\Exceptions\ForbiddenException;
+use Grav\Plugin\Api\Exceptions\NotFoundException;
+use Grav\Plugin\Api\Exceptions\ValidationException;
+use Grav\Plugin\Api\FlexBackend;
+use Grav\Plugin\Api\Response\ApiResponse;
+use Grav\Plugin\Api\Serializers\UserSerializer;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
+
+class UsersController extends AbstractApiController
+{
+    use FlexBackend;
+
+    private ?UserSerializer $serializer = null;
+
+    public function index(ServerRequestInterface $request): ResponseInterface
+    {
+        // Without api.users.read a caller can still see *their own* row —
+        // we auto-filter the listing to self rather than 403 the request.
+        // Anything beyond that requires api.users.read.
+        $currentUser = $this->getUser($request);
+        $canSeeAll = $this->isSuperAdmin($currentUser)
+            || $this->hasPermission($currentUser, 'api.users.read');
+
+        if (!$canSeeAll) {
+            return $this->indexSelfOnly($request, $currentUser);
+        }
+
+        $directory = $this->getFlexDirectory('user-accounts');
+        if ($directory) {
+            return $this->indexViaFlex($request, $directory);
+        }
+        return $this->indexViaAccounts($request);
+    }
+
+    /**
+     * Single-row "listing" for callers without api.users.read. Matches the
+     * paginated envelope of the full listing so the client doesn't need a
+     * special-case branch.
+     */
+    private function indexSelfOnly(ServerRequestInterface $request, UserInterface $currentUser): ResponseInterface
+    {
+        $pagination = $this->getPagination($request);
+        $data = [$this->serializeUser($currentUser)];
+
+        return ApiResponse::paginated(
+            data: $data,
+            total: 1,
+            page: $pagination['page'],
+            perPage: $pagination['per_page'],
+            baseUrl: $this->getApiBaseUrl() . '/users',
+        );
+    }
+
+    /**
+     * List users using the Flex-Objects backend (indexed, searchable).
+     */
+    private function indexViaFlex(ServerRequestInterface $request, FlexDirectory $directory): ResponseInterface
+    {
+        $pagination = $this->getPagination($request);
+        $query = $request->getQueryParams();
+        $search = $query['search'] ?? null;
+
+        // Grav's Flex FileStorage indexes every file in user/accounts/ without
+        // filtering by extension — any stray file left there by another plugin
+        // (e.g. revisions-pro's .rev snapshots) surfaces as a phantom user.
+        // Constrain to keys that look like actual usernames before the
+        // collection is built so downstream search/sort/pagination operate
+        // on real accounts only.
+        $index = $directory->getIndex();
+        $validKeys = array_values(array_filter(
+            $index->getKeys(),
+            static fn($k) => is_string($k) && preg_match('/^[a-z0-9_-]+$/i', $k) === 1,
+        ));
+        $collection = $directory->getCollection($validKeys);
+
+        // Apply search (searches username, email, fullname per blueprint config)
+        if ($search && $search !== '') {
+            $collection = $collection->search($search);
+        }
+
+        // Sort by username by default
+        $collection = $collection->sort(['username' => 'asc']);
+
+        $total = $collection->count();
+        $slice = $collection->slice($pagination['offset'], $pagination['limit']);
+
+        $data = [];
+        foreach ($slice as $flexUser) {
+            if ($flexUser instanceof UserInterface) {
+                $data[] = $this->serializeUser($flexUser);
+            }
+        }
+
+        return ApiResponse::paginated(
+            data: $data,
+            total: $total,
+            page: $pagination['page'],
+            perPage: $pagination['per_page'],
+            baseUrl: $this->getApiBaseUrl() . '/users',
+        );
+    }
+
+    /**
+     * List users using filesystem scan (fallback).
+     */
+    private function indexViaAccounts(ServerRequestInterface $request): ResponseInterface
+    {
+        $pagination = $this->getPagination($request);
+
+        $allUsers = [];
+        foreach ($this->getAllUsernames() as $username) {
+            $user = $this->grav['accounts']->load($username);
+            if ($user->exists()) {
+                $allUsers[] = $this->serializeUser($user);
+            }
+        }
+
+        $total = count($allUsers);
+        $paged = array_slice($allUsers, $pagination['offset'], $pagination['limit']);
+
+        return ApiResponse::paginated(
+            data: $paged,
+            total: $total,
+            page: $pagination['page'],
+            perPage: $pagination['per_page'],
+            baseUrl: $this->getApiBaseUrl() . '/users',
+        );
+    }
+
+    public function show(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        // Self-access mirrors update(): a user can fetch their own record
+        // with just api.access. Otherwise api.users.read is required to see
+        // someone else's account.
+        $currentUser = $this->getUser($request);
+        if ($currentUser->username !== $username) {
+            $this->requirePermission($request, 'api.users.read');
+        } else {
+            $this->requirePermission($request, 'api.access');
+        }
+
+        $user = $this->loadUserOrFail($username);
+
+        $data = $this->serializeUser($user);
+
+        // ETag is computed from the user data only — system capability flags
+        // like twofa_global_enabled are not part of the resource state and
+        // shouldn't cause spurious 409s on PATCH when the admin flips the
+        // global setting between fetch and save.
+        $etag = $this->generateEtag($data);
+
+        $data['twofa_global_enabled'] = (bool) $this->config->get('plugins.login.twofa_enabled', false);
+
+        return ApiResponse::create($data, 200, ['ETag' => '"' . $etag . '"']);
+    }
+
+    public function create(ServerRequestInterface $request): ResponseInterface
+    {
+        $this->requirePermission($request, 'api.users.write');
+
+        $body = $this->getRequestBody($request);
+        $this->requireFields($body, ['username', 'password', 'email']);
+
+        $username = $body['username'];
+
+        // Validate username format
+        if (!preg_match('/^[a-z0-9_-]{3,64}$/i', $username)) {
+            throw new ValidationException(
+                'Invalid username format.',
+                [['field' => 'username', 'message' => 'Username must be 3-64 characters and contain only letters, numbers, hyphens, and underscores.']],
+            );
+        }
+
+        /** @var UserCollectionInterface $accounts */
+        $accounts = $this->grav['accounts'];
+        $existing = $accounts->load($username);
+
+        if ($existing->exists()) {
+            throw new ConflictException("User '{$username}' already exists.");
+        }
+
+        // Create new user
+        $user = $accounts->load($username);
+        $user->set('email', $body['email']);
+        $user->set('fullname', $body['fullname'] ?? '');
+        $user->set('title', $body['title'] ?? '');
+        $user->set('state', $body['state'] ?? 'enabled');
+        $user->set('hashed_password', Authentication::create($body['password']));
+        $user->set('created', time());
+        $user->set('modified', time());
+
+        if (isset($body['access'])) {
+            $user->set('access', $body['access']);
+        }
+
+        // Allow plugins to modify the user before save
+        $this->fireAdminEvent('onAdminSave', ['object' => &$user]);
+
+        $user->save();
+
+        $this->fireAdminEvent('onAdminAfterSave', ['object' => $user]);
+        $this->fireEvent('onApiUserCreated', ['user' => $user]);
+
+        return ApiResponse::created(
+            data: $this->serializeUser($user),
+            location: $this->getApiBaseUrl() . '/users/' . $username,
+            headers: $this->invalidationHeaders(['users:create:' . $username, 'users:list']),
+        );
+    }
+
+    public function update(ServerRequestInterface $request): ResponseInterface
+    {
+        $currentUser = $this->getUser($request);
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        // Users can update themselves with just api.access, otherwise need api.users.write
+        $isSelf = $currentUser->username === $username;
+        $canManageUsers = $this->isSuperAdmin($currentUser)
+            || $this->hasPermission($currentUser, 'api.users.write');
+        if (!$isSelf) {
+            $this->requirePermission($request, 'api.users.write');
+        } else {
+            // Self-edit only requires api.access (already checked by auth middleware)
+            $this->requirePermission($request, 'api.access');
+        }
+
+        // ETag validation
+        $currentHash = $this->generateEtag($this->serializeUser($user));
+        $this->validateEtag($request, $currentHash);
+
+        $body = $this->getRequestBody($request);
+
+        if (empty($body)) {
+            throw new ValidationException('Request body must contain fields to update.');
+        }
+
+        // Privilege-sensitive fields are gated on api.users.write. Without this
+        // split a self-edit (api.access only) could PATCH `access` and grant
+        // itself api.super / admin.super — see GHSA-r945-h4vm-h736.
+        $selfFields  = ['email', 'fullname', 'title', 'language', 'content_editor', 'twofa_enabled'];
+        $adminFields = ['state', 'access'];
+
+        if (!$canManageUsers) {
+            foreach ($adminFields as $field) {
+                if (array_key_exists($field, $body)) {
+                    throw new ForbiddenException(
+                        "Modifying '{$field}' requires the 'api.users.write' permission."
+                    );
+                }
+            }
+        }
+
+        $allowedFields = $canManageUsers ? array_merge($selfFields, $adminFields) : $selfFields;
+        foreach ($allowedFields as $field) {
+            if (array_key_exists($field, $body)) {
+                $user->set($field, $body[$field]);
+            }
+        }
+
+        // Hash password if provided
+        if (isset($body['password']) && $body['password'] !== '') {
+            $user->set('hashed_password', Authentication::create($body['password']));
+        }
+
+        $user->set('modified', time());
+
+        // Allow plugins to modify the user before save
+        $this->fireAdminEvent('onAdminSave', ['object' => &$user]);
+
+        $user->save();
+
+        $this->fireAdminEvent('onAdminAfterSave', ['object' => $user]);
+        $this->fireEvent('onApiUserUpdated', ['user' => $user]);
+
+        return $this->respondWithEtag(
+            $this->serializeUser($user),
+            200,
+            ['users:update:' . $username, 'users:list'],
+        );
+    }
+
+    public function delete(ServerRequestInterface $request): ResponseInterface
+    {
+        $this->requirePermission($request, 'api.users.write');
+
+        $currentUser = $this->getUser($request);
+        $username = $this->getRouteParam($request, 'username');
+
+        if ($currentUser->username === $username) {
+            throw new ForbiddenException('You cannot delete your own account.');
+        }
+
+        $user = $this->loadUserOrFail($username);
+
+        $this->fireEvent('onApiBeforeUserDelete', ['user' => $user]);
+
+        // Remove user file
+        $file = $user->file();
+        if ($file) {
+            $file->delete();
+        }
+
+        $this->fireEvent('onApiUserDeleted', ['username' => $username]);
+
+        return ApiResponse::noContent(
+            $this->invalidationHeaders(['users:delete:' . $username, 'users:list']),
+        );
+    }
+
+    /**
+     * POST /users/{username}/avatar - Upload a custom avatar image.
+     */
+    public function uploadAvatar(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        $currentUser = $this->getUser($request);
+        if ($currentUser->username !== $username) {
+            $this->requirePermission($request, 'api.users.write');
+        }
+
+        $uploadedFiles = $request->getUploadedFiles();
+        $file = $uploadedFiles['avatar'] ?? $uploadedFiles['file'] ?? null;
+
+        if (!$file || $file->getError() !== UPLOAD_ERR_OK) {
+            throw new ValidationException('No avatar file uploaded.');
+        }
+
+        $mime = $file->getClientMediaType() ?? '';
+        if (!str_starts_with($mime, 'image/')) {
+            throw new ValidationException('Avatar must be an image file.');
+        }
+
+        // Save to account://avatars/
+        $locator = $this->grav['locator'];
+        $avatarDir = $locator->findResource('account://', true) . '/avatars';
+        if (!is_dir($avatarDir)) {
+            mkdir($avatarDir, 0755, true);
+        }
+
+        $ext = match ($mime) {
+            'image/png' => 'png',
+            'image/gif' => 'gif',
+            'image/webp' => 'webp',
+            default => 'jpg',
+        };
+
+        $filename = $username . '-' . substr(md5((string) time()), 0, 8) . '.' . $ext;
+        $filepath = $avatarDir . '/' . $filename;
+        $file->moveTo($filepath);
+
+        // Build path relative to Grav root (e.g. user/accounts/avatars/filename.jpg)
+        // to match the format used by the old admin plugin.
+        $relativeBase = $locator->findResource('account://', false);
+        $relativePath = $relativeBase . '/avatars/' . $filename;
+
+        // Update user's avatar reference
+        $user->set('avatar', [
+            $relativePath => [
+                'name' => $filename,
+                'type' => $mime,
+                'size' => filesize($filepath),
+                'path' => $relativePath,
+            ],
+        ]);
+        $user->save();
+
+        return ApiResponse::create(
+            $this->serializeUser($user),
+            201,
+            $this->invalidationHeaders(['users:update:' . $username]),
+        );
+    }
+
+    /**
+     * DELETE /users/{username}/avatar - Remove the custom avatar.
+     */
+    public function deleteAvatar(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        $currentUser = $this->getUser($request);
+        if ($currentUser->username !== $username) {
+            $this->requirePermission($request, 'api.users.write');
+        }
+
+        // Delete avatar file(s)
+        $avatar = $user->get('avatar');
+        if (is_array($avatar)) {
+            foreach ($avatar as $entry) {
+                if (is_array($entry) && isset($entry['path'])) {
+                    // path is relative to Grav root (e.g. user/accounts/avatars/file.jpg)
+                    $filePath = GRAV_ROOT . '/' . $entry['path'];
+                    if (file_exists($filePath)) {
+                        @unlink($filePath);
+                    }
+                }
+            }
+        }
+
+        $user->set('avatar', []);
+        $user->save();
+
+        return ApiResponse::create(
+            $this->serializeUser($user),
+            200,
+            $this->invalidationHeaders(['users:update:' . $username]),
+        );
+    }
+
+    /**
+     * POST /users/{username}/2fa - Generate or regenerate 2FA secret and return QR code.
+     */
+    public function generate2fa(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        // Self or admin
+        $currentUser = $this->getUser($request);
+        if ($currentUser->username !== $username) {
+            $this->requirePermission($request, 'api.users.write');
+        }
+
+        if (!class_exists(\Grav\Plugin\Login\TwoFactorAuth\TwoFactorAuth::class)) {
+            throw new \Grav\Plugin\Api\Exceptions\ApiException(
+                500,
+                '2FA Not Available',
+                'The Login plugin with 2FA support must be installed.'
+            );
+        }
+
+        $twoFa = new \Grav\Plugin\Login\TwoFactorAuth\TwoFactorAuth();
+        $secret = $twoFa->createSecret();
+
+        // Format secret with spaces for readability
+        $formattedSecret = trim(chunk_split($secret, 4, ' '));
+
+        // Save to user
+        $user->set('twofa_secret', $formattedSecret);
+        // Generating/regenerating a secret resets the enabled flag — the user
+        // must verify a code against the new secret to re-enable.
+        $user->set('twofa_enabled', false);
+        $user->save();
+
+        // Generate QR code data URI
+        $qrImage = $twoFa->getQrImageData($username, $secret);
+
+        return ApiResponse::create([
+            'secret' => $formattedSecret,
+            'qr_code' => $qrImage,
+        ]);
+    }
+
+    /**
+     * POST /users/{username}/2fa/enable - Verify a code against the stored
+     * secret and set twofa_enabled=true. Self-only: only the account owner
+     * can enable their own 2FA, because enabling requires proving you hold
+     * the secret (otherwise an attacker could lock a user out by enabling
+     * 2FA with a secret they don't control).
+     */
+    public function enable2fa(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        $currentUser = $this->getUser($request);
+        if ($currentUser->username !== $username) {
+            throw new ForbiddenException('Only the account owner can enable 2FA.');
+        }
+
+        $body = $this->getRequestBody($request);
+        $this->requireFields($body, ['code']);
+
+        if (!class_exists(\Grav\Plugin\Login\TwoFactorAuth\TwoFactorAuth::class)) {
+            throw new \Grav\Plugin\Api\Exceptions\ApiException(
+                500,
+                '2FA Not Available',
+                'The Login plugin with 2FA support must be installed.',
+            );
+        }
+
+        $secret = (string) $user->get('twofa_secret');
+        if ($secret === '') {
+            throw new ValidationException('2FA secret has not been generated. POST /users/{username}/2fa first.');
+        }
+
+        $twoFa = new \Grav\Plugin\Login\TwoFactorAuth\TwoFactorAuth();
+        if (!$twoFa->verifyCode($secret, (string) $body['code'])) {
+            throw new ValidationException('Invalid 2FA code.');
+        }
+
+        $user->set('twofa_enabled', true);
+        $user->save();
+
+        $this->fireEvent('onApiUser2faEnabled', ['user' => $user]);
+
+        return ApiResponse::create(['twofa_enabled' => true]);
+    }
+
+    /**
+     * POST /users/{username}/2fa/disable - Disable 2FA for a user.
+     *
+     * Self-disable requires a valid current TOTP code so that a stolen
+     * session cannot unilaterally remove 2FA. Admins with api.users.write
+     * (or superadmin) can force-disable without a code — used for lost-
+     * device recovery. Both paths clear twofa_secret.
+     */
+    public function disable2fa(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        $currentUser = $this->getUser($request);
+        $isSelf = $currentUser->username === $username;
+        $isAdmin = $this->isSuperAdmin($currentUser) || $this->hasPermission($currentUser, 'api.users.write');
+
+        if (!$isSelf && !$isAdmin) {
+            throw new ForbiddenException('You do not have permission to disable 2FA for this user.');
+        }
+
+        if ($isSelf && !$isAdmin) {
+            // Self-disable without admin privilege requires code verification.
+            $body = $this->getRequestBody($request);
+            $this->requireFields($body, ['code']);
+
+            if (!class_exists(\Grav\Plugin\Login\TwoFactorAuth\TwoFactorAuth::class)) {
+                throw new \Grav\Plugin\Api\Exceptions\ApiException(
+                    500,
+                    '2FA Not Available',
+                    'The Login plugin with 2FA support must be installed.',
+                );
+            }
+
+            $secret = (string) $user->get('twofa_secret');
+            $twoFa = new \Grav\Plugin\Login\TwoFactorAuth\TwoFactorAuth();
+            if (!$secret || !$twoFa->verifyCode($secret, (string) $body['code'])) {
+                throw new ValidationException('Invalid 2FA code.');
+            }
+        }
+
+        $user->set('twofa_enabled', false);
+        $user->set('twofa_secret', '');
+        $user->save();
+
+        $this->fireEvent('onApiUser2faDisabled', [
+            'user' => $user,
+            'forced_by_admin' => !$isSelf,
+        ]);
+
+        return ApiResponse::create(['twofa_enabled' => false]);
+    }
+
+    public function apiKeys(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        $this->requireApiKeyPermission($request, $username);
+
+        $manager = new ApiKeyManager();
+        $keys = $manager->listKeys($user);
+
+        return ApiResponse::create($keys);
+    }
+
+    public function createApiKey(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        $this->requireApiKeyPermission($request, $username, write: true);
+
+        $body = $this->getRequestBody($request);
+        $name = $body['name'] ?? '';
+        $scopes = $body['scopes'] ?? [];
+        $expiryDays = isset($body['expiry_days']) ? (int) $body['expiry_days'] : null;
+
+        $manager = new ApiKeyManager();
+        $result = $manager->generateKey($user, $name, $scopes, $expiryDays);
+
+        // Return the raw key (shown ONCE only) along with key metadata
+        $keys = $manager->listKeys($user);
+        $keyMeta = null;
+        foreach ($keys as $key) {
+            if ($key['id'] === $result['id']) {
+                $keyMeta = $key;
+                break;
+            }
+        }
+
+        $data = array_merge($keyMeta ?? [], ['api_key' => $result['key']]);
+
+        return ApiResponse::created(
+            data: $data,
+            location: $this->getApiBaseUrl() . '/users/' . $username . '/api-keys',
+            headers: $this->invalidationHeaders(['users:update:' . $username . ':api-keys']),
+        );
+    }
+
+    public function deleteApiKey(ServerRequestInterface $request): ResponseInterface
+    {
+        $username = $this->getRouteParam($request, 'username');
+        $user = $this->loadUserOrFail($username);
+
+        $this->requireApiKeyPermission($request, $username, write: true);
+
+        $keyId = $this->getRouteParam($request, 'keyId');
+
+        $manager = new ApiKeyManager();
+        $revoked = $manager->revokeKey($user, $keyId);
+
+        if (!$revoked) {
+            throw new NotFoundException("API key '{$keyId}' not found for user '{$username}'.");
+        }
+
+        return ApiResponse::noContent(
+            $this->invalidationHeaders(['users:update:' . $username . ':api-keys']),
+        );
+    }
+
+    /**
+     * Check permission for API key operations. Own user with api.access is sufficient,
+     * otherwise require api.users.read (or api.users.write for mutations).
+     */
+    private function requireApiKeyPermission(
+        ServerRequestInterface $request,
+        string $targetUsername,
+        bool $write = false,
+    ): void {
+        $currentUser = $this->getUser($request);
+        $isSelf = $currentUser->username === $targetUsername;
+
+        if ($isSelf) {
+            // Self-access only requires api.access
+            $this->requirePermission($request, 'api.access');
+        } else {
+            $this->requirePermission($request, $write ? 'api.users.write' : 'api.users.read');
+        }
+    }
+
+    private function loadUserOrFail(?string $username): UserInterface
+    {
+        if ($username === null || $username === '') {
+            throw new ValidationException('Username is required.');
+        }
+
+        /** @var UserCollectionInterface $accounts */
+        $accounts = $this->grav['accounts'];
+        $user = $accounts->load($username);
+
+        if (!$user->exists()) {
+            throw new NotFoundException("User '{$username}' not found.");
+        }
+
+        return $user;
+    }
+
+    private function serializeUser(UserInterface $user): array
+    {
+        return $this->getSerializer()->serialize($user);
+    }
+
+    private function getSerializer(): UserSerializer
+    {
+        return $this->serializer ??= new UserSerializer();
+    }
+
+    /**
+     * Get all usernames by scanning account files.
+     */
+    private function getAllUsernames(): array
+    {
+        $locator = $this->grav['locator'];
+
+        $accountDir = $locator->findResource('account://', true)
+            ?: $locator->findResource('user://accounts', true);
+
+        if (!$accountDir || !is_dir($accountDir)) {
+            return [];
+        }
+
+        $usernames = [];
+        foreach (new \DirectoryIterator($accountDir) as $file) {
+            if ($file->isDot() || !$file->isFile() || $file->getExtension() !== 'yaml') {
+                continue;
+            }
+            $usernames[] = $file->getBasename('.yaml');
+        }
+
+        sort($usernames);
+        return $usernames;
+    }
+}

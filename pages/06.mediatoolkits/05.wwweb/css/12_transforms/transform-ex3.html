@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8" />
+    <title>CSS Demos | transform</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      img {
+        width: 200px;
+        position: absolute;
+        top: 10px;
+        left: 50%;
+      }
+      .transparent {
+        opacity: 0.5;
+      }
+      .turn {
+        transform: rotate(45deg);
+        transform-origin: top left;
+      }
+    </style>
+  </head>
+  <body>
+    <img src="../images/css3.jpg" alt="CSS3 Logo" class="transparent" />
+    <img src="../images/css3.jpg" alt="CSS3 Logo" class="turn" />
+  </body>
+</html>

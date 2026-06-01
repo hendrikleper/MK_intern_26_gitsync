@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>background image</title>
+    <style>
+      * {
+        margin: 0; 
+        padding: 0;
+      }
+      html{
+        cursor: url(gradientcursor.png), auto;
+      }
+      .bg {
+        position: fixed;
+        right: 0;
+        bottom: 0;
+        min-width: 100%; 
+        min-height: 100%;
+        background-image: url(rnbo.jpg);
+        background-size: cover;
+        background-attachment: fixed;
+        background-position: center;
+        background-repeat: no-repeat;
+      }
+      h1 {
+        font-size: 4rem;
+        color: black;
+        mix-blend-mode: overlay;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bg">
+    <h1>Image Background, <br>Blendmode Overlay &<br> Custom Cursor</h1>
+    
+    https://www.w3schools.com/cssref/pr_mix-blend-mode.php
+
+    <p>This sketch uses CSS to display a full page background image for your webpage.</p>
+    <p>The CSS background-image property sets a background image for an element, in this case the html element. In this line, the CSS url() function's value should be a path to an image file that will be set as our background.</p>
+    <p>The background-size property tells our webpage how to size the background image. In this example it is set to "cover" so the image will be stretched to cover the entire page.</p>
+    <p>The background-attachment property controls whether or not the image will scroll with the page. Here, it is set to "fixed" which will keep the image in the same spot as the user scrolls on the page.</p>
+    <p>The background-position property sets the position of the background image. In this example it is set to "center", which will keep the image centered on the screen.</p>
+    <p>The background-repeat property will tell the page whether or not to repeat the image. By default, the image will repeat along the x and y axis. In this example it is set to "no-repeat" which will keep the image from repeating.</p>
+  </div>
+  </body>
+</html>
